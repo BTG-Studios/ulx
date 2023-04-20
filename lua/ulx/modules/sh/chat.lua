@@ -2,13 +2,24 @@
 CATEGORY_NAME = "Chat"
 
 ------------------------------ Psay ------------------------------
+local seepsayAccess = "ulx basicallythensa"
+if SERVER then ULib.ucl.registerAccess( seepsayAccess, ULib.ACCESS_OPERATOR, "Ability to see 'ulx psay'", "Other" ) end 
+
 function ulx.psay( calling_ply, target_ply, message )
 	if calling_ply:GetNWBool( "ulx_muted", false ) then
 		ULib.tsayError( calling_ply, "You are muted, and therefore cannot speak! Use asay for admin chat if urgent.", true )
 		return
 	end
 
-	ulx.fancyLog( { target_ply, calling_ply }, "#P to #P: " .. message, calling_ply, target_ply )
+	local players = player.GetAll()
+	for i=#players, 1, -1 do
+		local v = players[ i ]
+		if not ULib.ucl.query( v, seepsayAccess ) and v ~= calling_ply and v ~= target_ply then -- Calling player always gets to see the echo
+			table.remove( players, i )
+		end
+	end
+
+	ulx.fancyLog( players, "#P to #P: " .. message, calling_ply, target_ply )
 end
 local psay = ulx.command( CATEGORY_NAME, "ulx psay", ulx.psay, "!p", true )
 psay:addParam{ type=ULib.cmds.PlayerArg, target="!^", ULib.cmds.ignoreCanTarget }
