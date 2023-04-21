@@ -91,12 +91,17 @@ function ulx.thetime( calling_ply )
 		return
 	end
 
+	local hour = math.random(1,12)
+	local minute = math.random(0,59)
+	local minuteStr = minute < 10 and "0"..minute or minute
+	local ampm = math.random(1,2) == 1 and "AM" or "PM"
+
 	lasttimeusage = CurTime()
-	ulx.fancyLog( "The time is now #s.", os.date( "%I:%M %p") )
+	ulx.fancyLog( "The time is now #s.", hour..":"..minuteStr.." "..ampm )
 end
 local thetime = ulx.command( CATEGORY_NAME, "ulx thetime", ulx.thetime, "!thetime" )
 thetime:defaultAccess( ULib.ACCESS_ALL )
-thetime:help( "Shows you the server time." )
+thetime:help( "Shows you the real time." )
 
 
 ------------------------------ Adverts ------------------------------
@@ -201,29 +206,105 @@ gimp:help( "Gimps target(s) so they are unable to chat normally." )
 gimp:setOpposite( "ulx ungimp", {_, _, true}, "!ungimp" )
 
 ------------------------------ Mute ------------------------------
-function ulx.mute( calling_ply, target_plys, should_unmute )
-	for i=1, #target_plys do
-		local v = target_plys[ i ]
-		if should_unmute then
-			v.gimp = nil
-		else
-			v.gimp = ID_MUTE
+if SERVER then 
+	local function createMuteTable()
+		if not sql.TableExists("mutes") then 
+			sql.Query("CREATE TABLE mutes (sid TEXT PRIMARY KEY, unmuteTime NUMBER)")
 		end
-		v:SetNWBool("ulx_muted", not should_unmute)
 	end
 
-	if not should_unmute then
-		ulx.fancyLogAdmin( calling_ply, "#A muted #T", target_plys )
-	else
-		ulx.fancyLogAdmin( calling_ply, "#A unmuted #T", target_plys )
+	function ulx.recordMute(steamid64, unmuteTime)
+		local muteTime = tonumber(unmuteTime)
+		local steamid = sql.SQLStr(steamid64)
+		if muteTime == 0 then 
+			sql.Query("DELETE FROM mutes WHERE sid=" .. steamid)
+		else 
+			sql.Query("REPLACE INTO mutes VALUES("..steamid..", "..muteTime..")")
+		end
+	end
+
+	function ulx.recordMuteS0(steamid, unmuteTime)
+		local sid64 = util.SteamIDTo64(steamid)
+		if string.len(sid64) > 1 then 
+			recordMute(sid64, unmuteTime)
+		end
+	end
+
+	local function checkExpiredMutes()
+		local currentTime = os.time()
+		local muteList = sql.Query("SELECT sid FROM mutes WHERE unmuteTime < "..currentTime)
+		if muteList then 
+			PrintTable(muteList)
+			local playerList = {}
+			for k,v in pairs(player.GetAll()) do 
+				playerList[v:SteamID64()] = v
+			end
+			for _,v in pairs(muteList) do 
+				if playerList[v.sid] then 
+					local ply = playerList[v.sid]
+					ply:ChatPrint("Your mute has expired and has been lifted.")
+					ply:SetNWBool("ulx_muted", false)
+					ply.gimp = nil
+				end
+			end
+		end
+		sql.Query("DELETE FROM mutes WHERE unmuteTime < "..currentTime)
+	end
+
+	local function mutePlayerConnect(ply)
+		local steamid = sql.SQLStr(ply:SteamID64())
+		local isMuted = sql.QueryValue("SELECT unmuteTime FROM mutes WHERE sid="..steamid)
+		if isMuted then 
+			ply:ChatPrint("You were muted during a previous play session.")
+			local unmuteTime = isMuted >= 2140000000 and "Never" or os.date("%b %d %Y at %I:%M %p", isMuted)
+			ply:ChatPrint("Your mute will expire: "..unmuteTime)
+			ply:SetNWBool("ulx_muted", true)
+			ply.gimp = ID_MUTE
+		end
+	end
+	hook.Add("PlayerInitialSpawn", "mutePlayerConnect", mutePlayerConnect)
+
+	timer.Create("expiredMuteCheck", 15, 0, checkExpiredMutes)
+
+	createMuteTable()
+end
+function ulx.mute( calling_ply, target_ply, minutes, reason )
+	if target_ply:IsListenServerHost() or target_ply:IsBot() then
+		ULib.tsayError( calling_ply, "This player is immune", true )
+		return
+	end
+	--
+
+	local time = "for #s"
+	if minutes == 0 then time = "permanently" end
+	local str = "#A muted #T " .. time
+	if reason and reason ~= "" then str = str .. " (#s)" end
+	ulx.fancyLogAdmin( calling_ply, str, target_ply, minutes ~= 0 and ULib.secondsToStringTime( minutes * 60 ) or reason, reason )
+
+	target_ply:SetNWBool("ulx_muted", true)
+	target_ply.gimp = ID_MUTE
+	if SERVER then 
+		ulx.recordMute(target_ply:SteamID64(), minutes > 0 and (os.time() + (minutes * 60)) or 2140000000) 
 	end
 end
+
 local mute = ulx.command( CATEGORY_NAME, "ulx mute", ulx.mute, "!mute" )
-mute:addParam{ type=ULib.cmds.PlayersArg }
-mute:addParam{ type=ULib.cmds.BoolArg, invisible=true }
+mute:addParam{ type=ULib.cmds.PlayerArg }
+mute:addParam{ type=ULib.cmds.NumArg, hint="minutes, 0 for perma", ULib.cmds.allowTimeString, min=0 }
+mute:addParam{ type=ULib.cmds.StringArg, hint="reason", ULib.cmds.optional, ULib.cmds.takeRestOfLine }
 mute:defaultAccess( ULib.ACCESS_ADMIN )
-mute:help( "Mutes target(s) so they are unable to chat." )
-mute:setOpposite( "ulx unmute", {_, _, true}, "!unmute" )
+mute:help( "Mutes target." )
+
+function ulx.unmute( calling_ply, target_ply )
+	ulx.fancyLogAdmin( calling_ply, "#A unmuted #T", target_ply )
+	ulx.recordMute(target_ply:SteamID64(), 0)
+	target_ply:SetNWBool("ulx_muted", false)
+	target_ply.gimp = nil
+end
+local unmute = ulx.command( CATEGORY_NAME, "ulx unmute", ulx.unmute, "!unmute" )
+unmute:addParam{ type=ULib.cmds.PlayerArg }
+unmute:defaultAccess( ULib.ACCESS_ADMIN )
+unmute:help( "Unmuted target." )
 
 if SERVER then
 	local function gimpCheck( ply, strText )
@@ -237,26 +318,102 @@ if SERVER then
 end
 
 ------------------------------ Gag ------------------------------
-function ulx.gag( calling_ply, target_plys, should_ungag )
-	local players = player.GetAll()
-	for i=1, #target_plys do
-		local v = target_plys[ i ]
-		v.ulx_gagged = not should_ungag
-		v:SetNWBool("ulx_gagged", v.ulx_gagged)
+if SERVER then 
+	local function createGagTable()
+		if not sql.TableExists("gags") then 
+			sql.Query("CREATE TABLE gags (sid TEXT PRIMARY KEY, ungagTime NUMBER)")
+		end
 	end
 
-	if not should_ungag then
-		ulx.fancyLogAdmin( calling_ply, "#A gagged #T", target_plys )
-	else
-		ulx.fancyLogAdmin( calling_ply, "#A ungagged #T", target_plys )
+	function ulx.recordGag(steamid64, ungagTime)
+		local gagTime = tonumber(ungagTime)
+		local steamid = sql.SQLStr(steamid64)
+		if gagTime == 0 then 
+			sql.Query("DELETE FROM gags WHERE sid="..steamid)
+		else 
+			sql.Query("REPLACE INTO gags VALUES("..steamid..", "..gagTime..")")
+		end
 	end
+
+	function ulx.recordGagS0(steamid, ungagTime)
+		local sid64 = util.SteamIDTo64(steamid)
+		if string.len(sid64) > 1 then 
+			recordGag(sid64, ungagTime)
+		end
+	end
+
+	local function gagPlayerConnect(ply)
+		local steamid = sql.SQLStr(ply:SteamID64())
+		local isGagged = sql.QueryValue("SELECT ungagTime FROM gags WHERE sid="..steamid)
+		if isGagged then 
+			ply:ChatPrint("You were gagged during a previous play session.")
+			local ungagTime = isGagged >= 2140000000 and "Never" or os.date("%b %d %Y at %I:%M %p", isGagged)
+			ply:ChatPrint("Your gag will expire: "..ungagTime)
+			ply:SetNWBool("ulx_gagged", true)
+			ply.ulx_gagged = true
+		end
+	end
+	hook.Add("PlayerInitialSpawn", "gagPlayerConnect", gagPlayerConnect)
+
+	local function checkExpiredGags()
+		local currentTime = os.time()
+		local gagList = sql.Query("SELECT sid FROM gags WHERE ungagTime < "..currentTime)
+		if gagList then 
+			local playerList = {}
+			for k,v in pairs(player.GetAll()) do 
+				playerList[v:SteamID64()] = v
+			end
+			for _,v in pairs(gagList) do 
+				if playerList[v.sid] then 
+					local ply = playerList[v.sid]
+					ply:ChatPrint("Your gag has expired and has been lifted.")
+					ply:SetNWBool("ulx_gagged", false)
+					ply.ulx_gagged = false
+				end
+			end
+		end
+		sql.Query("DELETE FROM gags WHERE ungagTime < "..currentTime)
+	end
+
+	timer.Create("expiredGagCheck", 15, 0, checkExpiredGags)
+
+	createGagTable()
 end
+function ulx.gag( calling_ply, target_ply, minutes, reason )
+	if target_ply:IsListenServerHost() or target_ply:IsBot() then
+		ULib.tsayError( calling_ply, "This player is immune", true )
+		return
+	end
+	--
+
+	local time = "for #s"
+	if minutes == 0 then time = "permanently" end
+	local str = "#A gagged #T " .. time
+	if reason and reason ~= "" then str = str .. " (#s)" end
+	ulx.fancyLogAdmin( calling_ply, str, target_ply, minutes ~= 0 and ULib.secondsToStringTime( minutes * 60 ) or reason, reason )
+
+	target_ply.ulx_gagged = true
+	target_ply:SetNWBool("ulx_gagged", true)
+	ulx.recordGag(target_ply:SteamID64(), minutes > 0 and (os.time() + (minutes * 60)) or 2140000000) 
+end
+
 local gag = ulx.command( CATEGORY_NAME, "ulx gag", ulx.gag, "!gag" )
-gag:addParam{ type=ULib.cmds.PlayersArg }
-gag:addParam{ type=ULib.cmds.BoolArg, invisible=true }
+gag:addParam{ type=ULib.cmds.PlayerArg }
+gag:addParam{ type=ULib.cmds.NumArg, hint="minutes, 0 for perma", ULib.cmds.allowTimeString, min=0 }
+gag:addParam{ type=ULib.cmds.StringArg, hint="reason", ULib.cmds.optional, ULib.cmds.takeRestOfLine }
 gag:defaultAccess( ULib.ACCESS_ADMIN )
-gag:help( "Gag target(s), disables microphone." )
-gag:setOpposite( "ulx ungag", {_, _, true}, "!ungag" )
+gag:help( "Gags target." )
+
+function ulx.ungag( calling_ply, target_ply )
+	ulx.fancyLogAdmin( calling_ply, "#A ungagged #T", target_ply )
+	ulx.recordGag(target_ply:SteamID64(), 0)
+	target_ply:SetNWBool("ulx_gagged", false)
+	target_ply.ulx_gagged = false
+end
+local ungag = ulx.command( CATEGORY_NAME, "ulx ungag", ulx.ungag, "!ungag" )
+ungag:addParam{ type=ULib.cmds.PlayerArg }
+ungag:defaultAccess( ULib.ACCESS_ADMIN )
+ungag:help( "Ungags target." )
 
 local function gagHook( listener, talker )
 	if talker.ulx_gagged then
@@ -264,6 +421,34 @@ local function gagHook( listener, talker )
 	end
 end
 hook.Add( "PlayerCanHearPlayersVoice", "ULXGag", gagHook )
+
+if CLIENT then 
+	hook.Add( "HUDPaint", "GagMuteDisplayHook", function()
+		if LocalPlayer():GetNWBool("ulx_gagged", false) then 
+			local boxPosX, boxPosY = 15, 15
+			local panelContent = "You are gagged and cannot use voice chat"
+			surface.SetDrawColor( 156, 0, 0, 32 )
+			surface.SetFont( "Trebuchet24" )
+			surface.SetTextColor( 255, 255, 255, 64 )
+			local textSizeW,textSizeH = surface.GetTextSize(panelContent)
+			surface.DrawRect( boxPosX, boxPosY, textSizeW + 24, textSizeH + 10 )
+			surface.SetTextPos( boxPosX + 12, boxPosY + 5 ) 
+			surface.DrawText(panelContent)
+		end
+
+		if LocalPlayer():GetNWBool("ulx_muted", false) then 
+			local panelContent = "You are muted and cannot use text chat"
+			surface.SetDrawColor( 156, 0, 0, 32 )
+			surface.SetFont( "Trebuchet24" )
+			surface.SetTextColor( 255, 255, 255, 64 )
+			local textSizeW,textSizeH = surface.GetTextSize(panelContent)
+			local boxPosX, boxPosY = ScrW() - textSizeW - 39, 15
+			surface.DrawRect( boxPosX, boxPosY, textSizeW + 24, textSizeH + 10 )
+			surface.SetTextPos( boxPosX + 12, boxPosY + 5 ) 
+			surface.DrawText(panelContent)
+		end
+	end )
+end
 
 -- Anti-spam stuff
 if SERVER then
